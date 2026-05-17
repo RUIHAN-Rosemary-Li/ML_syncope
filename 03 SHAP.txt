@@ -1,0 +1,172 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import shap
+
+from sklearn.model_selection import train_test_split
+from autogluon.tabular import TabularPredictor
+
+
+N_BACKGROUND = 100
+N_EXPLAIN = 1000
+NSAMPLES_KERNEL = 100   
+
+def rebuild_dataframe_from_array(x_array, template_df: pd.DataFrame) -> pd.DataFrame:
+    x_df = pd.DataFrame(x_array, columns=template_df.columns)
+
+    for col in template_df.columns:
+        target_dtype = template_df[col].dtype
+        if pd.api.types.is_numeric_dtype(target_dtype):
+            x_df[col] = pd.to_numeric(x_df[col], errors="coerce")
+        else:
+            x_df[col] = x_df[col].astype(str)
+    return x_df
+
+def encode_feature_for_plot(series: pd.Series):
+    s_num = pd.to_numeric(series, errors="coerce")
+    if not s_num.isna().all():
+        return s_num.values, None
+    codes, uniques = pd.factorize(series.astype(str))
+    return codes.astype(float), uniques.tolist()
+
+np.random.seed(42)
+
+all_shap_tables = []
+
+for outcome_key in ["1w", "1m", "1y"]:
+    print("=" * 80)
+    print("Processing:", outcome_key)
+
+    outcome_col = OUTCOME_MAP[outcome_key]
+    outcome_dir = os.path.join(base_dir, outcome_key)
+
+    predictor = TabularPredictor.load(os.path.join(outcome_dir, "ag_model"))
+    metrics_df = pd.read_csv(os.path.join(outcome_dir, f"{outcome_key}_model_metrics_default_threshold.csv"))
+    best_row = metrics_df.sort_values(["auc", "auprc", "f1"], ascending=False).iloc[0]
+    best_model_name = best_row["model"]
+    print("Best model:", best_model_name)
+
+    df_processed = preprocess_for_outcome(df_raw, outcome_col)
+    train_df, test_df = train_test_split(
+        df_processed,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+        stratify=df_processed[outcome_col]
+    )
+
+    X_test = test_df.drop(columns=[outcome_col]).copy()
+
+    background_df = X_test.sample(min(N_BACKGROUND, len(X_test)), random_state=42).copy()
+    explain_df = X_test.sample(min(N_EXPLAIN, len(X_test)), random_state=123).copy()
+
+    def predict_fn(x_array):
+        x_df = rebuild_dataframe_from_array(x_array, X_test)
+        return get_positive_proba(predictor, x_df, best_model_name)
+
+    explainer = shap.KernelExplainer(
+        predict_fn,
+        background_df
+    )
+
+    shap_values = explainer.shap_values(
+        explain_df,
+        nsamples=NSAMPLES_KERNEL
+    )
+
+    if isinstance(shap_values, list):
+        shap_values_to_plot = shap_values[-1]
+    else:
+        shap_values_to_plot = shap_values
+
+    plt.figure(figsize=(8, 6))
+    shap.summary_plot(
+        shap_values_to_plot,
+        explain_df,
+        max_display=15,
+        show=False
+    )
+    plt.title(f"SHAP Summary Plot for {label_map[outcome_key]}")
+    plt.tight_layout()
+    beeswarm_path = os.path.join(base_dir, f"{outcome_key}_shap_summary_beeswarm_1000.png")
+    plt.savefig(beeswarm_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    plt.figure(figsize=(8, 6))
+    shap.summary_plot(
+        shap_values_to_plot,
+        explain_df,
+        plot_type="bar",
+        max_display=15,
+        show=False
+    )
+    plt.title(f"SHAP Importance Plot for {label_map[outcome_key]}")
+    plt.tight_layout()
+    bar_path = os.path.join(base_dir, f"{outcome_key}_shap_summary_bar_1000.png")
+    plt.savefig(bar_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    mean_abs_shap = np.abs(shap_values_to_plot).mean(axis=0)
+    shap_df = pd.DataFrame({
+        "feature": explain_df.columns,
+        "mean_abs_shap": mean_abs_shap
+    }).sort_values("mean_abs_shap", ascending=False)
+
+    shap_df["outcome_key"] = outcome_key
+    shap_df["best_model"] = best_model_name
+
+    shap_csv = os.path.join(base_dir, f"{outcome_key}_shap_summary_table_1000.csv")
+    shap_df.to_csv(shap_csv, index=False)
+    all_shap_tables.append(shap_df)
+
+    top4_features = shap_df["feature"].head(4).tolist()
+    print("Top 4 features:", top4_features)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+
+    for ax, feat in zip(axes, top4_features):
+        col_idx = explain_df.columns.get_loc(feat)
+        x_raw = explain_df[feat]
+        y_shap = shap_values_to_plot[:, col_idx]
+
+        x_plot, categories = encode_feature_for_plot(x_raw)
+
+        if len(np.unique(x_plot[~np.isnan(x_plot)])) <= 10:
+            jitter = np.random.normal(0, 0.03, size=len(x_plot))
+            x_draw = x_plot + jitter
+        else:
+            x_draw = x_plot
+
+        ax.scatter(x_draw, y_shap, s=18, alpha=0.7)
+        ax.axhline(0, linestyle="--", color="gray", linewidth=1)
+
+        ax.set_xlabel(feat)
+        ax.set_ylabel("SHAP value")
+        ax.set_title(f"Dependence Plot: {feat}")
+
+        if categories is not None and len(categories) <= 10:
+            ax.set_xticks(range(len(categories)))
+            ax.set_xticklabels(categories, rotation=30, ha="right")
+
+    for j in range(len(top4_features), 4):
+        fig.delaxes(axes[j])
+
+    plt.suptitle(f"Top 4 SHAP Dependence Plots for {label_map[outcome_key]}", y=1.02)
+    plt.tight_layout()
+
+    dep_path = os.path.join(base_dir, f"{outcome_key}_shap_dependence_top4_1000.png")
+    plt.savefig(dep_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print("Saved:", beeswarm_path)
+    print("Saved:", bar_path)
+    print("Saved:", dep_path)
+    print("Saved:", shap_csv)
+
+all_shap_df = pd.concat(all_shap_tables, ignore_index=True)
+all_shap_path = os.path.join(base_dir, "three_outcomes_shap_summary_table_1000.csv")
+all_shap_df.to_csv(all_shap_path, index=False)
+
+print("=" * 80)
+print("Combined SHAP table saved to:", all_shap_path)

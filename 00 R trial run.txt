@@ -1,0 +1,230 @@
+library(tidymodels)
+library(readxl)
+library(themis)
+library(xgboost)
+library(doParallel)
+library(recipes)
+library(DescTools)
+library(ranger) 
+library(ggplot2)
+library(patchwork)
+library(vip)
+library(kableExtra)
+library(writexl) 
+
+all_results <- data.frame()
+
+automatic <- function(dataname, num, seed, param = "trees(range = c(300, 1000)),tree_depth(range = c(3, 8)),learn_rate(range = c(0.01, 0.3)),loss_reduction(),min_n(range = c(5, 20)),sample_prop(range = c(0.6, 1)),mtry(range = c(5, 30)),
+  size = 30", threshold){
+  #seed <- as.integer(Sys.time()) %% 100 + 100
+  
+  data <- read_excel(paste0(dataname, ".xlsx"))
+  colnames(data)
+  missing_pct <- colMeans(is.na(data)) * 100       
+  vars_to_keep <- names(missing_pct[missing_pct <= 30])  
+  data <- data %>% select(all_of(vars_to_keep))
+  data <- data %>%
+    mutate(
+      visit_1yr = factor(visit_1yr, levels = c(1,0)),
+      visit_1mo = factor(visit_1mo, levels = c(1,0)),
+      visit_1wk = factor(visit_1wk, levels = c(1,0))
+    )
+  split <- initial_split(
+    data,
+    prop = 0.7,
+    strata = "visit_1yr"
+  )
+  train_data_original <- training(split)
+  test_data_original <- testing(split)
+  write.csv(test_data_original, file = paste0("./outs/test_",num,".csv"))
+  write.csv(train_data_original, file = paste0("./outs/train_",num,".csv"))
+  
+  times <- c("yr", "mo", "wk")
+  for (time in times){
+    train_data <- train_data_original
+    test_data <- test_data_original
+    
+    var <- paste0("visit_1", time)
+    all_visit_vars <- c("visit_1wk", "visit_1mo", "visit_1yr")
+    vars_to_remove <- setdiff(all_visit_vars, var)
+    
+    train_data <- train_data %>%
+      select(-all_of(vars_to_remove))
+    test_data <- test_data %>%
+      select(-all_of(vars_to_remove))
+    
+    rec <- recipe(as.formula(paste(var, "~ .")), data = train_data) %>%
+      #step_rm(blood_pressure, all_of(vars_to_remove)) %>%#
+      step_mutate(
+        across(
+          any_of(c("PLT",#"aptt",
+                   "age", "SBP", "DBP", "pulse", #"spo2",
+                   "WBC", "HGB", "HCT",  "Glu",
+                   "ALT", "AST", "BUN", "Crea", "Na", "K", "Cl",
+                   "CK-MB ng/ml", "Myo", "Tni", "BNP",
+                   "d_dimer"#, "prothrombin_time", "inr",
+                   #"fibrinogen", "thrombin_time"
+          )),
+          ~ suppressWarnings(as.numeric(.x))
+        )
+      ) %>%
+      step_unknown(gender, new_level = "missing") %>%
+      step_novel(gender) %>%
+      step_impute_bag(all_predictors()) %>%
+      #step_impute_median(all_numeric_predictors()) %>%
+      step_mutate(
+        across(all_numeric_predictors(),~ DescTools::Winsorize(.x, probs = c(0.1, 0.9))
+        )
+      ) %>%
+      step_string2factor(gender) %>%
+      step_dummy(gender) %>%
+      step_zv(all_predictors()) %>%
+      step_smote(!!sym(var))
+    
+    cv_folds <- vfold_cv(train_data,v = 10,strata = !!sym(var))
+    xgb_spec_sens <- boost_tree(
+      trees = tune(),
+      tree_depth = tune(),
+      learn_rate = tune(),
+      loss_reduction = tune(),
+      min_n = tune(),
+      sample_size = tune(),
+      mtry = tune()
+    ) %>%
+      set_engine("xgboost") %>%
+      set_mode("classification")
+    xgb_wf_sens <- workflow() %>%
+      add_recipe(rec) %>%
+      add_model(xgb_spec_sens)
+    xgb_grid_sens <- eval(parse(text = paste0("grid_space_filling(", param, ")")))
+    xgb_metrics <- metric_set(
+      sens,
+      spec,
+      roc_auc
+    )
+    set.seed(NULL)
+    set.seed(seed)
+    print("start xgb")
+    xgb_tuned_sens <- tune_grid(
+      xgb_wf_sens,
+      resamples = cv_folds,
+      grid = xgb_grid_sens,
+      metrics = xgb_metrics,
+      control = control_grid(
+        save_pred = TRUE,
+        verbose = TRUE
+      )
+    )
+    print(paste0("done xgb for ",time))
+    
+    roc_auc_df <- xgb_tuned_sens %>%
+      collect_metrics() %>%
+      filter(.metric == "roc_auc") %>%
+      select(mtry, trees, min_n, tree_depth, learn_rate, 
+             loss_reduction, sample_size, .config, roc_auc = mean)
+    sens_df <- xgb_tuned_sens %>%
+      collect_metrics() %>%
+      filter(.metric == "sens") %>%
+      select(mtry, trees, min_n, tree_depth, learn_rate,
+             loss_reduction, sample_size, .config, sens = mean)
+    spec_df <- xgb_tuned_sens %>%
+      collect_metrics() %>%
+      filter(.metric == "spec") %>%
+      select(mtry, trees, min_n, tree_depth, learn_rate,
+             loss_reduction, sample_size, .config, spec = mean)
+    metrics_combined <- roc_auc_df %>%
+      inner_join(sens_df, by = c("mtry", "trees", "min_n", "tree_depth", 
+                                 "learn_rate", "loss_reduction", "sample_size", ".config")) %>%
+      inner_join(spec_df, by = c("mtry", "trees", "min_n", "tree_depth",
+                                 "learn_rate", "loss_reduction", "sample_size", ".config"))
+    best_xgb_params <- metrics_combined %>%
+      filter(sens >= 0.2) %>%  
+      arrange(desc(roc_auc)) 
+    print(best_xgb_params)
+    
+    final_xgb_wf <- finalize_workflow(xgb_wf_sens,best_xgb_params[1,])
+    final_xgb_fit <- fit(final_xgb_wf, data = train_data)
+    
+    xgb_preds <- predict(final_xgb_fit, test_data, type = "prob") %>%
+      bind_cols(test_data)
+    roc_df <- roc_curve(xgb_preds, truth = !!sym(var), .pred_1)
+    
+    roc_df <- roc_df %>%
+      filter(sensitivity >= 0.9) %>%
+      arrange(desc(specificity))
+    threshold <- if (roc_df$.threshold[1] > 0.1) roc_df$.threshold[1] else 0.1
+    xgb_preds <- xgb_preds %>%
+      mutate(
+        pred_class = factor(
+          ifelse(.pred_1 > threshold, "1", "0"),
+          levels = c("1", "0")
+        )
+      )
+    conf_mat(xgb_preds, truth = !!sym(var), estimate = pred_class)
+    roc_auc <- roc_auc(xgb_preds, truth = !!sym(var), .pred_1)$.estimate
+    accuracy <- accuracy(xgb_preds, truth = !!sym(var), estimate = pred_class)$.estimate
+    sensitivity <- sens(xgb_preds, truth = !!sym(var), estimate = pred_class)$.estimate
+    specificity <- spec(xgb_preds, truth = !!sym(var), estimate = pred_class)$.estimate
+    metrics_summary <- data.frame(model = "xgb", roc_auc = roc_auc,accuracy = accuracy,sensitivity = sensitivity,specificity = specificity)
+    print(metrics_summary)
+    metrics_input <- data.frame(dataname=dataname, timeframe=time, index=num, seed=seed, threshold=threshold)
+    
+    temp_result <- data.frame(
+      num = num,
+      timeframe = time,
+      roc_auc = roc_auc,
+      sensitivity = sensitivity,
+      accuracy = accuracy,
+      specificity = specificity,
+      seed = seed,
+      threshold = threshold,
+      stringsAsFactors = FALSE
+    )
+    if (!exists("all_results", envir = .GlobalEnv)) {
+      assign("all_results", temp_result, envir = .GlobalEnv)
+    } else {
+      assign("all_results", rbind(get("all_results", envir = .GlobalEnv), temp_result), envir = .GlobalEnv)
+    }
+    
+    p_importance <- final_xgb_fit %>%
+      extract_fit_engine() %>%
+      vip(num_features = 20) +
+      labs(title = "xgb Feature Importance")
+    print(p_importance)
+    
+    kable_save <- function(filename = "./outs/rough's_evaluations.html") {
+      tbl1 <- metrics_summary %>%
+        kable(format = "html", digits = 3) %>%
+        kable_styling("striped", full_width = FALSE) %>%
+        add_header_above(c("Metrics Summary" = ncol(metrics_summary))) %>%
+        row_spec(0, bold = TRUE)
+      tbl2 <- metrics_input %>%
+        kable(format = "html", digits = 3) %>%
+        kable_styling("striped", full_width = FALSE) %>%
+        add_header_above(c("Input Info" = ncol(metrics_input))) %>%
+        row_spec(0, bold = TRUE)
+      tbl3 <- data.frame(
+        "Parameter Configuration" = gsub(",", ",\n", param),
+        check.names = FALSE
+      ) %>%
+        kable(format = "html", align = "c") %>%
+        kable_styling("striped", full_width = FALSE, position = "center") %>%
+        row_spec(0, bold = TRUE, align = "c") 
+      tbl4 <- best_xgb_params[1:10,] %>%
+        kable(format = "html", digits = 3) %>%
+        kable_styling("striped", full_width = FALSE) %>%
+        add_header_above(c("Best Parameters" = ncol(best_xgb_params))) %>%
+        row_spec(0, bold = TRUE)
+      combined <- paste("<html><body>",tbl1, "<br>", tbl2, "<br>", tbl3, "<br>", tbl4, "</body></html>",sep = "\n")
+      cat(combined, file = filename)
+    }
+    kable_save(filename = paste0("./outs/rough's_evaluations_",time,num,".html"))
+    save(best_xgb_params, final_xgb_wf, final_xgb_fit, p_importance, rec, xgb_grid_sens, xgb_preds, test_data, train_data,
+         file = paste0("./outs/package_",time,num,".rdata"))
+    saveRDS(final_xgb_fit, paste0("./outs/model",time,num,".rds"))
+    ggsave(paste0("./outs/xgb_feature_importance_",time,num,".png"), p_importance, width = 6, height = 5.7, dpi = 300)  
+    
+    rm(roc_auc, accuracy, sensitivity, specificity)
+  }
+  
+}

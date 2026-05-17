@@ -1,0 +1,158 @@
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readxl)
+library(patchwork)
+
+data <- read_excel("./data10_org/month_metrix.xlsx", sheet = "Sheet1")
+
+colnames(data) <- c("group", "rep", "youden_thresh", "AUC", "accuracy", 
+                    "sens", "spec", "npv", "f1", "brier", 
+                    "manual_thresh", "accuracy_", "sens_", "spec_", "npv_")
+colnames(data) <- c("group", "rep", "youden_thresh", "AUC", "accuracy1", 
+                    "sens1", "spec1", "npv1", "f1", "brier", 
+                    "manual_thresh", "accuracy", "sens", "spec", "npv")
+
+data_clean <- data %>%
+  select(group, rep, AUC, accuracy, sens, spec) %>%
+  mutate(
+    subgroup = case_when(
+      group == 0 ~ "Total",
+      group == 1 ~ "Age+",
+      group == 2 ~ "Age-",
+      group == 3 ~ "CV+",
+      group == 4 ~ "CV-"
+    ),
+    subgroup = factor(subgroup, levels = c("Total", "Age+", "Age-", "CV+", "CV-"))
+  )
+table(data_clean$subgroup)
+
+data_long <- data_clean %>%
+  pivot_longer(cols = c(AUC, accuracy, sens, spec),
+               names_to = "metric",
+               values_to = "value") %>%
+  mutate(
+    metric = case_when(
+      metric == "AUC" ~ "AUC",
+      metric == "accuracy" ~ "Accuracy",
+      metric == "sens" ~ "Sensitivity",
+      metric == "spec" ~ "Specificity"
+    ),
+    metric = factor(metric, levels = c("AUC", "Accuracy", "Sensitivity", "Specificity"))
+  )
+
+p_faceted <- ggplot(data_long, aes(x = subgroup, y = value, fill = subgroup)) +
+  geom_boxplot(width = 0.7, alpha = 0.8, outlier.size = 1.5) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 1) +
+  labs(title = "Performance Metrics Across Subgroups",
+       subtitle = "Boxplots showing distribution of AUC, Accuracy, Sensitivity, and Specificity",
+       x = "Subgroup",
+       y = "Value") +
+  scale_fill_manual(values = c("Total" = "#7BAFDE",
+                               "Age+" = "indianred4",
+                               "Age-" = "lightcoral",
+                               "CV+" = "#1A9641",
+                               "CV-" = "#A6D96A")) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 10),
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.background = element_rect(fill = "lightgray", color = NA),
+        strip.text = element_text(face = "bold", size = 11))
+
+print(p_faceted)
+
+
+
+
+
+library(dplyr)
+library(tidyr)
+library(readxl)
+
+data <- read_excel("./data10_org/all_metrix.xlsx", sheet = "Sheet1")
+
+colnames(data) <- c("group", "time", "rep", "AUC", "accuracy", "sens", "spec")
+data_clean <- data %>%
+  mutate(
+    subgroup = case_when(
+      group == 0 ~ "Total",
+      group == 1 ~ "Age+",
+      group == 2 ~ "Age-",
+      group == 3 ~ "CV+",
+      group == 4 ~ "CV-"
+    ),
+    time = factor(time, levels = c("w", "m", "y"), 
+                  labels = c("Week", "Month", "Year")),
+    subgroup = factor(subgroup, levels = c("Total", "Age+", "Age-", "CV+", "CV-"))
+  )
+
+statistics_by_group_time <- data_clean %>%
+  group_by(subgroup, time) %>%
+  summarise(
+    AUC_mean = mean(AUC, na.rm = TRUE),
+    AUC_sd = sd(AUC, na.rm = TRUE),
+    AUC_se = AUC_sd / sqrt(n()),
+    AUC_median = median(AUC, na.rm = TRUE),
+    AUC_min = min(AUC, na.rm = TRUE),
+    AUC_max = max(AUC, na.rm = TRUE),
+    AUC_n = n(),
+    
+    ACC_mean = mean(accuracy, na.rm = TRUE),
+    ACC_sd = sd(accuracy, na.rm = TRUE),
+    ACC_se = ACC_sd / sqrt(n()),
+    ACC_median = median(accuracy, na.rm = TRUE),
+    ACC_min = min(accuracy, na.rm = TRUE),
+    ACC_max = max(accuracy, na.rm = TRUE),
+    ACC_n = n(),
+    
+    SENS_mean = mean(sens, na.rm = TRUE),
+    SENS_sd = sd(sens, na.rm = TRUE),
+    SENS_se = SENS_sd / sqrt(n()),
+    SENS_median = median(sens, na.rm = TRUE),
+    SENS_min = min(sens, na.rm = TRUE),
+    SENS_max = max(sens, na.rm = TRUE),
+    SENS_n = n(),
+    
+    SPEC_mean = mean(spec, na.rm = TRUE),
+    SPEC_sd = sd(spec, na.rm = TRUE),
+    SPEC_se = SPEC_sd / sqrt(n()),
+    SPEC_median = median(spec, na.rm = TRUE),
+    SPEC_min = min(spec, na.rm = TRUE),
+    SPEC_max = max(spec, na.rm = TRUE),
+    SPEC_n = n(),
+    
+    .groups = "drop"
+  ) %>%
+  mutate(
+    AUC_mean_sd = sprintf("%.3f ± %.3f", AUC_mean, AUC_sd),
+    AUC_mean_se = sprintf("%.3f ± %.3f", AUC_mean, AUC_se),
+    ACC_mean_sd = sprintf("%.3f ± %.3f", ACC_mean, ACC_sd),
+    ACC_mean_se = sprintf("%.3f ± %.3f", ACC_mean, ACC_se),
+    SENS_mean_sd = sprintf("%.3f ± %.3f", SENS_mean, SENS_sd),
+    SENS_mean_se = sprintf("%.3f ± %.3f", SENS_mean, SENS_se),
+    SPEC_mean_sd = sprintf("%.3f ± %.3f", SPEC_mean, SPEC_sd),
+    SPEC_mean_se = sprintf("%.3f ± %.3f", SPEC_mean, SPEC_se)
+  )
+
+
+library(writexl)
+sheets <- list(
+  "Statistics_Complete" = statistics_long,
+  "Statistics_By_Subgroup" = statistics_by_group %>% 
+    select(subgroup, AUC_mean_sd, ACC_mean_sd, SENS_mean_sd, SPEC_mean_sd, 
+           AUC_n, ACC_n, SENS_n, SPEC_n),
+  "Statistics_By_Time" = statistics_by_time %>% 
+    select(time, AUC_mean_sd, ACC_mean_sd, SENS_mean_sd, SPEC_mean_sd, 
+           AUC_n, ACC_n, SENS_n, SPEC_n),
+  "Statistics_Detailed" = statistics_by_group_time %>%
+    select(subgroup, time, 
+           AUC_mean_sd, AUC_median, AUC_min, AUC_max, AUC_n,
+           ACC_mean_sd, ACC_median, ACC_min, ACC_max, ACC_n,
+           SENS_mean_sd, SENS_median, SENS_min, SENS_max, SENS_n,
+           SPEC_mean_sd, SPEC_median, SPEC_min, SPEC_max, SPEC_n)
+)
+write_xlsx(sheets, "all_metrix_statistics.xlsx")

@@ -1,0 +1,141 @@
+library(fs)
+library(stringr)
+
+source_dir <- ""
+target_dir <- ""
+
+if (!dir_exists(target_dir)) dir_create(target_dir)
+
+sub_folders <- c(
+  "repeated_holdout_best_base_family",
+  "repeated_holdout_threshold_detail_all_repeats",
+  "roc_curves",
+  "pr_curves",
+  "calibration_curves",
+  "dca_curves",
+  "best_model_thresholds",
+  "shap_bar_top10",
+  "shap_beeswarm_top10",
+  "shap_dependence_top10",
+  "shap_summary_top10",
+  "feature_importance_best_model"
+)
+
+for (folder in sub_folders) {
+  folder_path <- path(target_dir, folder)
+  if (!dir_exists(folder_path)) {
+    dir_create(folder_path)
+     }
+}
+
+time_window_map <- c("1w" = "1", "1m" = "2", "1y" = "3")
+
+file_mappings <- list(
+  list(
+    folder = "repeated_holdout_best_base_family",
+    pattern = "repeated_holdout_best_base_family\\.csv$"
+  ),
+  list(
+    folder = "repeated_holdout_threshold_detail_all_repeats",
+    pattern = "(repeated_holdout_all_thresholds_by_repeat|repeated_holdout_threshold_detail_all_repeats)\\.csv$"
+  ),
+  list(
+    folder = "roc_curves",
+    pattern = "roc_curves\\.png$"
+  ),
+  list(
+    folder = "pr_curves",
+    pattern = "pr_curves\\.png$"
+  ),
+  list(
+    folder = "calibration_curves",
+    pattern = "calibration_curves\\.png$"
+  ),
+  list(
+    folder = "dca_curves",
+    pattern = "dca_curves\\.png$"
+  ),
+  list(
+    folder = "best_model_thresholds",
+    pattern = "best_model_thresholds\\.png$"
+  ),
+  list(
+    folder = "shap_bar_top10",
+    pattern = "shap_bar_top10\\.png$"
+  ),
+  list(
+    folder = "shap_beeswarm_top10",
+    pattern = "shap_beeswarm_top10\\.png$"
+  ),
+  list(
+    folder = "shap_dependence_top10",
+    pattern = "shap_dependence_top10\\.png$"
+  ),
+  list(
+    folder = "shap_summary_top10",
+    pattern = "shap_summary_table_top10\\.csv$"
+  ),
+  list(
+    folder = "feature_importance_best_model",
+    pattern = "feature_importance_best_model\\.csv$"
+  )
+)
+
+get_group <- function(file_path) {
+  rel_path <- path_rel(file_path, source_dir)
+  parts <- path_split(rel_path)[[1]]
+  
+  if (parts[1] == "total") return("0")
+  if (parts[1] == "age") {
+    if (parts[2] == "+") return("1")
+    if (parts[2] == "-") return("2")
+  }
+  if (parts[1] == "cardiocereberal vascular") {
+    if (parts[2] == "+") return("3")
+    if (parts[2] == "-") return("4")
+  }
+  return(NA)
+}
+
+get_time_window <- function(file_path) {
+  rel_path <- path_rel(file_path, source_dir)
+  parts <- path_split(rel_path)[[1]]
+  
+  for (i in seq_along(parts)) {
+    if (parts[i] %in% c("1m", "1w", "1y")) {
+      return(time_window_map[parts[i]])
+    }
+  }
+  return(NA)
+}
+
+process_files <- function() {
+  total_count <- 0
+  
+  for (mapping in file_mappings) {
+    target_folder <- mapping$folder
+    pattern <- mapping$pattern
+    
+    matched_files <- dir_ls(source_dir, recurse = TRUE, type = "file", regexp = pattern)
+    
+    folder_count <- 0
+    for (file in matched_files) {
+      group <- get_group(file)
+      time_win <- get_time_window(file)
+      
+      ext <- path_ext(file)
+      
+      new_name <- sprintf("%s-%s.%s", group, time_win, ext)
+      dest_path <- path(target_dir, target_folder, new_name)
+      
+      file_copy(file, dest_path, overwrite = TRUE)
+      cat(sprintf("  ✓ %s -> %s/%s\n", basename(file), target_folder, new_name))
+      folder_count <- folder_count + 1
+      total_count <- total_count + 1
+
+  }
+  }
+}
+
+process_files()
+

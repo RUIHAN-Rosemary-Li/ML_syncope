@@ -1,0 +1,157 @@
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(readxl)
+
+setwd("")
+data <- read_excel("./data_org/all_auc.xlsx", sheet = "Sheet1")
+
+head(data)
+unique(data$group)
+unique(data$time)
+
+colnames(data) <- c("group", "rep", "time", "AUC")
+time_labels <- c("w" = "Week", "m" = "Month", "y" = "Year")
+
+total_data <- data %>%
+  filter(group == 0) %>%
+  mutate(
+    subgroup = "Total",
+    timeframe = factor(time, levels = c("w", "m", "y"), labels = c("Week", "Month", "Year"))
+  )
+age_data <- data %>%
+  filter(group %in% c(1, 2)) %>%
+  mutate(
+    subgroup = case_when(
+      group == 1 ~ "Age+",
+      group == 2 ~ "Age-"
+    ),
+    timeframe = factor(time, levels = c("w", "m", "y"), labels = c("Week", "Month", "Year"))
+  )
+cv_data <- data %>%
+  filter(group %in% c(3, 4)) %>%
+  mutate(
+    subgroup = case_when(
+      group == 3 ~ "CV+",
+      group == 4 ~ "CV-"
+    ),
+    timeframe = factor(time, levels = c("w", "m", "y"), labels = c("Week", "Month", "Year"))
+  )
+
+summary_total <- total_data %>%
+  group_by(subgroup, timeframe) %>%
+  summarise(
+    mean_auc = mean(AUC, na.rm = TRUE),
+    se_auc = sd(AUC, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+summary_age <- age_data %>%
+  group_by(subgroup, timeframe) %>%
+  summarise(
+    mean_auc = mean(AUC, na.rm = TRUE),
+    se_auc = sd(AUC, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+summary_cv <- cv_data %>%
+  group_by(subgroup, timeframe) %>%
+  summarise(
+    mean_auc = mean(AUC, na.rm = TRUE),
+    se_auc = sd(AUC, na.rm = TRUE) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+summary_table <- bind_rows(
+  summary_total %>% mutate(Domain = "Total"),
+  summary_age %>% mutate(Domain = "Age"),
+  summary_cv %>% mutate(Domain = "CV")
+) %>%
+  select(Domain, subgroup, timeframe, n, mean_auc, se_auc) %>%
+  arrange(Domain, subgroup, timeframe)
+
+print(summary_table)
+write.csv(summary_table, "AUC_summary_statistics.csv", row.names = FALSE)
+
+
+plot_group <- function(data, title_name, colors_vec) {
+  if(nrow(data) == 0) {
+    return(ggplot() + annotate("text", x = 0.5, y = 0.5, label = "No data") + 
+             theme_void() + labs(title = title_name))
+  }
+  dodge <- position_dodge(width = 0.7)
+  
+  ggplot(data, aes(x = timeframe, y = mean, fill = subgroup, group = subgroup)) +
+    geom_col(position = dodge, width = 0.6, alpha = 0.8, color = "black", linewidth = 0.3) +
+    geom_line(position = dodge, size = 1, aes(color = subgroup)) +
+    geom_point(position = dodge, size = 3, aes(color = subgroup)) +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = subgroup),
+                position = dodge, alpha = 0.2, show.legend = FALSE) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), 
+                  position = dodge, width = 0.2, size = 0.5, alpha = 0.7) +
+    labs(title = title_name,
+         x = "Time Window", y = "Mean AUC") +
+    scale_fill_manual(values = colors_vec, name = "Subgroup") +
+    scale_color_manual(values = colors_vec, name = "Subgroup") +
+    theme_minimal(base_size = 12) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+          legend.position = "bottom",
+          legend.title = element_blank(),
+          axis.text = element_text(size = 10),
+          axis.title = element_text(size = 11)) +
+    coord_cartesian(ylim = c(0.5, 1.0)) 
+}
+
+library(RColorBrewer)
+total_colors <- c("#7BAFDE")  #, "#2C5F8A"
+age_colors <- c("lightcoral", "indianred4")
+cv_colors <- c("#A6D96A", "#1A9641")  
+
+p_total <- plot_group(summary_total, "Total", total_colors)
+p_age <- plot_group(summary_age, "Age", age_colors)
+p_cv <- plot_group(summary_cv, "Cardiocereberal", cv_colors)
+
+combined_plot <- p_total + p_age + p_cv +
+  plot_annotation(
+    title = "AUC Comparison Across Time Windows and Subgroups",
+    subtitle = "Bars: Mean AUC | Points & Lines: Trend | Ribbons/Error Bars: ±1 SE",
+    theme = theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+                  plot.subtitle = element_text(hjust = 0.5, size = 11))
+  )
+print(combined_plot)
+ggsave("AUC_subgroup_timeframe_plot.png", combined_plot, width = 15, height = 6, dpi = 300)
+
+
+
+
+
+import pandas as pd
+from scipy import stats
+import numpy as np
+
+df = pd.read_excel('./data_org/all_auc.xlsx', sheet_name='Sheet1')
+time_points = ['w', 'm', 'y']
+
+for time in time_points:
+    print(f"\n--- {time} ---")
+    
+    # group1 vs group2
+    data1 = df[(df['group'] == 1) & (df['time'] == time)]['AUC']
+    data2 = df[(df['group'] == 2) & (df['time'] == time)]['AUC']
+    t_stat, p_val = stats.ttest_ind(data1, data2)
+    print(f"group1 vs group2: t={t_stat:.4f}, p={p_val:.6f} ({'sig' if p_val<0.05 else 'ns'})")
+    print(f"  group1: {np.mean(data1):.4f}±{np.std(data1, ddof=1):.4f}")
+    print(f"  group2: {np.mean(data2):.4f}±{np.std(data2, ddof=1):.4f}")
+    
+    # group3 vs group4
+    data3 = df[(df['group'] == 3) & (df['time'] == time)]['AUC']
+    data4 = df[(df['group'] == 4) & (df['time'] == time)]['AUC']
+    t_stat, p_val = stats.ttest_ind(data3, data4)
+    print(f"group3 vs group4: t={t_stat:.4f}, p={p_val:.6f} ({'sig' if p_val<0.05 else 'ns'})")
+    print(f"  group3: {np.mean(data3):.4f}±{np.std(data3, ddof=1):.4f}")
+    print(f"  group4: {np.mean(data4):.4f}±{np.std(data4, ddof=1):.4f}")
+
